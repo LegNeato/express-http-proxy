@@ -6,7 +6,8 @@ var http = require('http');
 var https = require('https');
 var getRawBody = require('raw-body');
 var zlib = require('zlib');
-
+var fs = require('fs');
+var streamToPromise = require('stream-to-promise');
 
 function unset(val) {
   return (typeof val  ===  'undefined' || val === '' || val === null);
@@ -31,12 +32,17 @@ module.exports = function proxy(host, options) {
   var preserveReqSession = options.preserveReqSession;
   var memoizeHost = unset(options.memoizeHost) ? true : options.memoizeHost;
   var parseReqBody = unset(options.parseReqBody) ? true : options.parseReqBody;
+  var bodyCacheFile = options.bodyCacheFile;
 
   return function handleProxy(req, res, next) {
     if (!filter(req, res)) { return next(); }
     var resolvePath = resolveProxyPathAsync(req, res);
-    var parseBody = (!parseReqBody) ? Promise.resolve(null) : maybeParseBody(req, limit);
-    var prepareRequest = Promise.all([resolvePath, parseBody]);
+    var parseBody = (!parseReqBody || bodyCacheFile) ? Promise.resolve(null) : maybeParseBody(req, limit);
+    if (bodyCacheFile) {
+      req.bodyCacheFile = bodyCacheFile;
+      var bodyCachePromise = streamToPromise(req.pipe(fs.createWriteStream(bodyCacheFile)));
+    }
+    var prepareRequest = Promise.all([resolvePath, parseBody, bodyCachePromise]);
     prepareRequest.then(function(results) {
       var path = results[0];
       var bodyContent = results[1];
@@ -180,7 +186,14 @@ module.exports = function proxy(host, options) {
         proxyTargetRequest.end();
       } else {
         // Pipe will call end when it has completely read from the request.
-        req.pipe(proxyTargetRequest);
+        if (bodyCacheFile) {
+          // If we cached the body to a file, `req`'s stream will be empty
+          // (as we already read all data from it). So we need to read from
+          // the cached data instead.
+          fs.createReadStream(bodyCacheFile).pipe(proxyTargetRequest);
+        } else {
+          req.pipe(proxyTargetRequest);
+        }
       }
 
 
